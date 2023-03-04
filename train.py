@@ -1,7 +1,15 @@
-# coding:utf-8
-from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+
+# coding:utf-8
+from __future__ import absolute_import
+from collections import OrderedDict
+from pdvc.pdvc import build
+from data.video_dataset import PropSeqDataset, collate_fn
+from misc.utils import print_alert_message, build_floder, create_logger, backup_envir, print_opt, set_seed
+from tensorboardX import SummaryWriter
+import opts
+from eval_utils import evaluate
 
 import json
 import time
@@ -21,13 +29,6 @@ sys.path.insert(0, os.path.join(pdvc_dir, 'densevid_eval3'))
 sys.path.insert(0, os.path.join(pdvc_dir, 'densevid_eval3/SODA'))
 # print(sys.path)
 
-from eval_utils import evaluate
-import opts
-from tensorboardX import SummaryWriter
-from misc.utils import print_alert_message, build_floder, create_logger, backup_envir, print_opt, set_seed
-from data.video_dataset import PropSeqDataset, collate_fn
-from pdvc.pdvc import build
-from collections import OrderedDict
 
 def train(opt):
     set_seed(opt.seed)
@@ -76,7 +77,8 @@ def train(opt):
 
     epoch = saved_info[opt.start_from_mode[:4]].get('epoch', 0)
     iteration = saved_info[opt.start_from_mode[:4]].get('iter', 0)
-    best_val_score = saved_info[opt.start_from_mode[:4]].get('best_val_score', -1e5)
+    best_val_score = saved_info[opt.start_from_mode[:4]].get(
+        'best_val_score', -1e5)
     val_result_history = saved_info['history'].get('val_result_history', {})
     loss_history = saved_info['history'].get('loss_history', {})
     lr_history = saved_info['history'].get('lr_history', {})
@@ -94,21 +96,26 @@ def train(opt):
             model_pth = torch.load(os.path.join(save_folder, 'model-best.pth'))
         elif opt.start_from_mode == 'last':
             model_pth = torch.load(os.path.join(save_folder, 'model-last.pth'))
-        logger.info('Loading pth from {}, iteration:{}'.format(save_folder, iteration))
+        logger.info('Loading pth from {}, iteration:{}'.format(
+            save_folder, iteration))
         model.load_state_dict(model_pth['model'])
 
     # Load the pre-trained model
     if opt.pretrain and (not opt.start_from):
-        logger.info('Load pre-trained parameters from {}'.format(opt.pretrain_path))
-        model_pth = torch.load(opt.pretrain_path, map_location=torch.device(opt.device))
+        logger.info(
+            'Load pre-trained parameters from {}'.format(opt.pretrain_path))
+        model_pth = torch.load(
+            opt.pretrain_path, map_location=torch.device(opt.device))
         # query_weight = model_pth['model'].pop('query_embed.weight')
         if opt.pretrain == 'encoder':
             encoder_filter = model.get_filter_rule_for_encoder()
-            encoder_pth = {k:v for k,v in model_pth['model'].items() if encoder_filter(k)}
+            encoder_pth = {
+                k: v for k, v in model_pth['model'].items() if encoder_filter(k)}
             model.load_state_dict(encoder_pth, strict=True)
         elif opt.pretrain == 'decoder':
             encoder_filter = model.get_filter_rule_for_encoder()
-            decoder_pth = {k:v for k,v in model_pth['model'].items() if not encoder_filter(k)}
+            decoder_pth = {
+                k: v for k, v in model_pth['model'].items() if not encoder_filter(k)}
             model.load_state_dict(decoder_pth, strict=True)
             pass
         elif opt.pretrain == 'full':
@@ -120,13 +127,17 @@ def train(opt):
     model.to(opt.device)
 
     if opt.optimizer_type == 'adam':
-        optimizer = optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.weight_decay)
+        optimizer = optim.Adam(model.parameters(), lr=opt.lr,
+                               weight_decay=opt.weight_decay)
 
     elif opt.optimizer_type == 'adamw':
-        optimizer = optim.AdamW(model.parameters(), lr=opt.lr, weight_decay=opt.weight_decay)
+        optimizer = optim.AdamW(
+            model.parameters(), lr=opt.lr, weight_decay=opt.weight_decay)
 
-    milestone = [opt.learning_rate_decay_start + opt.learning_rate_decay_every * _ for _ in range(int((opt.epoch - opt.learning_rate_decay_start) / opt.learning_rate_decay_every))]
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestone, gamma=opt.learning_rate_decay_rate)
+    milestone = [opt.learning_rate_decay_start + opt.learning_rate_decay_every * _ for _ in range(
+        int((opt.epoch - opt.learning_rate_decay_start) / opt.learning_rate_decay_every))]
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer, milestone, gamma=opt.learning_rate_decay_rate)
 
     if opt.start_from:
         optimizer.load_state_dict(model_pth['optimizer'])
@@ -150,7 +161,8 @@ def train(opt):
         if True:
             # scheduled sampling rate update
             if epoch > opt.scheduled_sampling_start >= 0:
-                frac = (epoch - opt.scheduled_sampling_start) // opt.scheduled_sampling_increase_every
+                frac = (
+                    epoch - opt.scheduled_sampling_start) // opt.scheduled_sampling_increase_every
                 opt.ss_prob = min(opt.basic_ss_prob + opt.scheduled_sampling_increase_prob * frac,
                                   opt.scheduled_sampling_max_prob)
                 model.caption_head.ss_prob = opt.ss_prob
@@ -158,10 +170,9 @@ def train(opt):
             print('lr:{}'.format(float(opt.current_lr)))
             pass
 
-
         # Batch-level iteration
         for dt in tqdm(train_loader, disable=opt.disable_tqdm):
-            if opt.device=='cuda':
+            if opt.device == 'cuda':
                 torch.cuda.synchronize(opt.device)
             if opt.debug:
                 # each epoch contains less mini-batches for debugging
@@ -171,7 +182,8 @@ def train(opt):
             iteration += 1
 
             optimizer.zero_grad()
-            dt = {key: _.to(opt.device) if isinstance(_, torch.Tensor) else _ for key, _ in dt.items()}
+            dt = {key: _.to(opt.device) if isinstance(
+                _, torch.Tensor) else _ for key, _ in dt.items()}
             dt['video_target'] = [
                 {key: _.to(opt.device) if isinstance(_, torch.Tensor) else _ for key, _ in vid_info.items()} for vid_info in
                 dt['video_target']]
@@ -180,17 +192,19 @@ def train(opt):
 
             output, loss = model(dt, criterion, opt.transformer_input_type)
 
-            final_loss = sum(loss[k] * weight_dict[k] for k in loss.keys() if k in weight_dict)
+            final_loss = sum(loss[k] * weight_dict[k]
+                             for k in loss.keys() if k in weight_dict)
             final_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
 
             optimizer.step()
 
-            for loss_k,loss_v in loss.items():
-                loss_sum[loss_k] = loss_sum.get(loss_k, 0)+ loss_v.item()
-            loss_sum['total_loss'] = loss_sum.get('total_loss', 0) + final_loss.item()
+            for loss_k, loss_v in loss.items():
+                loss_sum[loss_k] = loss_sum.get(loss_k, 0) + loss_v.item()
+            loss_sum['total_loss'] = loss_sum.get(
+                'total_loss', 0) + final_loss.item()
 
-            if opt.device=='cuda':
+            if opt.device == 'cuda':
                 torch.cuda.synchronize()
 
             losses_log_every = int(len(train_loader) / 10)
@@ -201,16 +215,18 @@ def train(opt):
             if iteration % losses_log_every == 0:
                 end = time.time()
                 for k in loss_sum.keys():
-                    loss_sum[k] = np.round(loss_sum[k] /losses_log_every, 3).item()
+                    loss_sum[k] = np.round(
+                        loss_sum[k] / losses_log_every, 3).item()
 
                 logger.info(
                     "ID {} iter {} (epoch {}), \nloss = {}, \ntime/iter = {:.3f}, bad_vid = {:.3f}"
-                        .format(opt.id, iteration, epoch, loss_sum,
-                                (end - start) / losses_log_every, bad_video_num))
+                    .format(opt.id, iteration, epoch, loss_sum,
+                            (end - start) / losses_log_every, bad_video_num))
 
                 tf_writer.add_scalar('lr', opt.current_lr, iteration)
                 for loss_type in loss_sum.keys():
-                    tf_writer.add_scalar(loss_type, loss_sum[loss_type], iteration)
+                    tf_writer.add_scalar(
+                        loss_type, loss_sum[loss_type], iteration)
                 loss_history[iteration] = loss_sum
                 lr_history[iteration] = opt.current_lr
                 loss_sum = OrderedDict()
@@ -227,7 +243,8 @@ def train(opt):
                          'optimizer': optimizer.state_dict(), }
 
             if opt.save_all_checkpoint:
-                checkpoint_path = os.path.join(save_folder, 'model_iter_{}.pth'.format(iteration))
+                checkpoint_path = os.path.join(
+                    save_folder, 'model_iter_{}.pth'.format(iteration))
             else:
                 checkpoint_path = os.path.join(save_folder, 'model-last.pth')
 
@@ -235,30 +252,41 @@ def train(opt):
 
             model.eval()
             result_json_path = os.path.join(save_folder, 'prediction',
-                                         'num{}_epoch{}.json'.format(
-                                             len(val_dataset), epoch))
-            eval_score, eval_loss = evaluate(model, criterion, postprocessors, val_loader, result_json_path, logger=logger, alpha=opt.ec_alpha, device=opt.device, debug=opt.debug)
+                                            'num{}_epoch{}.json'.format(
+                                                len(val_dataset), epoch))
+            eval_score, eval_loss = evaluate(model, criterion, postprocessors, val_loader, result_json_path,
+                                             logger=logger, alpha=opt.ec_alpha, device=opt.device, debug=opt.debug)
             if opt.caption_decoder_type == 'none':
-                current_score = 2./(1./eval_score['Precision'] + 1./eval_score['Recall'])
+                current_score = 2. / \
+                    (1./eval_score['Precision'] + 1./eval_score['Recall'])
             else:
                 if opt.criteria_for_best_ckpt == 'dvc':
-                    current_score = np.array(eval_score['METEOR']).mean() + np.array(eval_score['soda_c']).mean()
+                    current_score = np.array(eval_score['METEOR']).mean(
+                    ) + np.array(eval_score['soda_c']).mean()
                 else:
-                    current_score = np.array(eval_score['para_METEOR']).mean() + np.array(eval_score['para_CIDEr']).mean() + np.array(eval_score['para_Bleu_4']).mean()
+                    current_score = np.array(eval_score['para_METEOR']).mean(
+                    ) + np.array(eval_score['para_CIDEr']).mean() + np.array(eval_score['para_Bleu_4']).mean()
 
             # add to tf summary
             for key in eval_score.keys():
-                tf_writer.add_scalar(key, np.array(eval_score[key]).mean(), iteration)
+                tf_writer.add_scalar(key, np.array(
+                    eval_score[key]).mean(), iteration)
 
             for loss_type in eval_loss.keys():
-                tf_writer.add_scalar('eval_' + loss_type, eval_loss[loss_type], iteration)
+                tf_writer.add_scalar('eval_' + loss_type,
+                                     eval_loss[loss_type], iteration)
 
-            _ = [item.append(np.array(item).mean()) for item in eval_score.values() if isinstance(item, list)]
-            print_info = '\n'.join([key + ":" + str(eval_score[key]) for key in eval_score.keys()])
-            logger.info('\nValidation results of iter {}:\n'.format(iteration) + print_info)
-            logger.info('\noverall score of iter {}: {}\n'.format(iteration, current_score))
+            _ = [item.append(np.array(item).mean())
+                 for item in eval_score.values() if isinstance(item, list)]
+            print_info = '\n'.join(
+                [key + ":" + str(eval_score[key]) for key in eval_score.keys()])
+            logger.info('\nValidation results of iter {}:\n'.format(
+                iteration) + print_info)
+            logger.info('\noverall score of iter {}: {}\n'.format(
+                iteration, current_score))
             val_result_history[epoch] = {'eval_score': eval_score}
-            logger.info('Save model at iter {} to {}.'.format(iteration, checkpoint_path))
+            logger.info('Save model at iter {} to {}.'.format(
+                iteration, checkpoint_path))
 
             # save the model parameter and  of best epoch
             if current_score >= best_val_score:
@@ -275,8 +303,10 @@ def train(opt):
                                       }
 
                 # suffix = "RL" if sc_flag else "CE"
-                torch.save(saved_pth, os.path.join(save_folder, 'model-best.pth'))
-                logger.info('Save Best-model at iter {} to checkpoint file.'.format(iteration))
+                torch.save(saved_pth, os.path.join(
+                    save_folder, 'model-best.pth'))
+                logger.info(
+                    'Save Best-model at iter {} to checkpoint file.'.format(iteration))
 
             saved_info['last'] = {'opt': vars(opt),
                                   'iter': iteration,
@@ -309,9 +339,11 @@ def train(opt):
 if __name__ == '__main__':
     opt = opts.parse_opts()
     if opt.gpu_id:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in opt.gpu_id])
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+            [str(i) for i in opt.gpu_id])
     if opt.disable_cudnn:
         torch.backends.cudnn.enabled = False
 
-    os.environ['KMP_DUPLICATE_LIB_OK'] = 'True' # to avoid OMP problem on macos
+    # to avoid OMP problem on macos
+    os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
     train(opt)
